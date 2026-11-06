@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Data, caches and results (mounted at runtime)
+Datasets/
+Log_placements/
+Score_cache/
+Results*/
+
+# HuggingFace model cache (mount at runtime)
+.cache/
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

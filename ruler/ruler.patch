@@ -1,0 +1,211 @@
+diff --git a/scripts/data/prepare.py b/scripts/data/prepare.py
+index 4d106c4..bf00516 100644
+--- a/scripts/data/prepare.py
++++ b/scripts/data/prepare.py
+@@ -121,7 +121,7 @@ def main():
+         try:
+             script = os.path.join(curr_folder, args.benchmark, f"{config['task']}.py")
+             additional_args = " ".join([f"--{k} {v}" for k, v in config['args'].items()])
+-            command = f"""python {script} \
++            command = f"""python3 {script} \
+             --save_dir  {args.save_dir} \
+             --save_name {args.task} \
+             --subset {args.subset} \
+diff --git a/scripts/data/synthetic/niah.py b/scripts/data/synthetic/niah.py
+index 729eddc..125f2ab 100644
+--- a/scripts/data/synthetic/niah.py
++++ b/scripts/data/synthetic/niah.py
+@@ -203,7 +203,7 @@ def generate_input_output(num_haystack):
+         query=query,
+     )
+ 
+-    return input_text, answers
++    return input_text, answers, context, query
+ 
+ 
+ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incremental: int = 500):
+@@ -222,7 +222,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+         incremental = 5
+ 
+     # Estimate tokens per question to determine reasonable upper bound
+-    sample_input_text, _ = generate_input_output(incremental)
++    sample_input_text, *_ = generate_input_output(incremental)
+     sample_tokens = len(TOKENIZER.text_to_tokens(sample_input_text))
+     tokens_per_haystack = sample_tokens / incremental
+ 
+@@ -241,7 +241,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+ 
+     while lower_bound <= upper_bound:
+         mid = (lower_bound + upper_bound) // 2
+-        input_text, answer = generate_input_output(mid)
++        input_text, answer, *_ = generate_input_output(mid)
+         total_tokens = len(TOKENIZER.text_to_tokens(input_text)) + tokens_to_generate
+ 
+         logger.info(f"Testing haystack size: {mid}, resulting tokens: {total_tokens}/{max_seq_length}")
+@@ -264,7 +264,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+         used_haystack = num_haystack
+         while(True):
+             try:
+-                input_text, answer  = generate_input_output(used_haystack)
++                input_text, answer, haystack, query = generate_input_output(used_haystack)
+                 length = len(TOKENIZER.text_to_tokens(input_text)) + tokens_to_generate
+                 assert length <= max_seq_length, f"{length} exceeds max_seq_length."
+                 break
+@@ -274,6 +274,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+ 
+         if args.remove_newline_tab:
+             input_text = ' '.join(input_text.replace('\n', ' ').replace('\t', ' ').strip().split())
++            haystack = ' '.join(haystack.replace('\n', ' ').replace('\t', ' ').strip().split())
+         answer_prefix_index = input_text.rfind(TASKS['niah']['answer_prefix'][:10]) # use first 10 char of answer prefix to locate it
+         answer_prefix = input_text[answer_prefix_index:]
+         input_text = input_text[:answer_prefix_index]
+@@ -284,6 +285,8 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+             'index': index,
+             "input": input_text,
+             "outputs": answer,
++            "haystack": haystack,
++            "query": query,
+             "length": length,
+             'length_w_model_temp': length + args.model_template_token,
+             'answer_prefix': answer_prefix,
+diff --git a/scripts/data/synthetic/qa.py b/scripts/data/synthetic/qa.py
+index d71cf03..2ff9a88 100644
+--- a/scripts/data/synthetic/qa.py
++++ b/scripts/data/synthetic/qa.py
+@@ -37,6 +37,7 @@ import sys
+ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+ from tokenizer import select_tokenizer
+ from manifest_utils import write_manifest
++from nltk.tokenize import sent_tokenize
+ import logging
+ 
+ logging.basicConfig(level=logging.INFO, force=True)
+@@ -82,14 +83,39 @@ def read_squad(file):
+     for d in data['data']:
+         more_docs = [total_docs_dict[p['context']] for p in d['paragraphs']]
+         for p in d['paragraphs']:
++            ctx = p['context']
++            sents = sent_tokenize(ctx)
++            sent_spans = []
++            cursor = 0
++            for s in sents:
++                pos = ctx.find(s, cursor)
++                if pos < 0:
++                    continue
++                sent_spans.append((pos, pos + len(s), s))
++                cursor = pos + len(s)
+             for qas in p['qas']:
+-                if not qas['is_impossible']:
+-                    total_qas.append({
+-                        'query': qas['question'],
+-                        'outputs': [a['text'] for a in qas['answers']],
+-                        'context': [total_docs_dict[p['context']]],
+-                        'more_context': [idx for idx in more_docs if idx != total_docs_dict[p['context']]]
+-                    })
++                if qas['is_impossible']:
++                    continue
++                evidence = []
++                seen = set()
++                for a in qas['answers']:
++                    a_start = a.get('answer_start', -1)
++                    sent = None
++                    for s_start, s_end, s_text in sent_spans:
++                        if s_start <= a_start < s_end:
++                            sent = s_text
++                            break
++                    sent = sent or a['text']
++                    if sent and sent not in seen:
++                        evidence.append(sent)
++                        seen.add(sent)
++                total_qas.append({
++                    'query': qas['question'],
++                    'outputs': [a['text'] for a in qas['answers']],
++                    'context': [total_docs_dict[p['context']]],
++                    'more_context': [idx for idx in more_docs if idx != total_docs_dict[p['context']]],
++                    'evidence': evidence,
++                })
+ 
+     return total_qas, total_docs
+ 
+@@ -104,10 +130,22 @@ def read_hotpotqa(file):
+ 
+     total_qas = []
+     for d in data:
++        title_to_sents = {t: sents for t, sents in d['context']}
++        evidence = []
++        seen = set()
++        for t, i in d.get('supporting_facts', []):
++            sents = title_to_sents.get(t)
++            if sents is None or not (0 <= i < len(sents)):
++                continue
++            s = sents[i]
++            if s and s not in seen:
++                evidence.append(s)
++                seen.add(s)
+         total_qas.append({
+             'query': d['question'],
+             'outputs': [d['answer']],
+             'context': [total_docs_dict[f"{t}\n{''.join(p)}"] for t, p in d['context']],
++            'evidence': evidence,
+         })
+ 
+     return total_qas, total_docs
+@@ -147,7 +185,7 @@ def generate_input_output(index, num_docs):
+         context=context,
+         query=curr_q
+     )
+-    return input_text, curr_a
++    return input_text, curr_a, context, curr_q
+ 
+ 
+ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incremental: int = 10):
+@@ -157,7 +195,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+     max_seq_length -= args.model_template_token
+ 
+     # Estimate tokens per question to determine reasonable upper bound
+-    sample_input_text, _ = generate_input_output(0, incremental)
++    sample_input_text, *_ = generate_input_output(0, incremental)
+     sample_tokens = len(TOKENIZER.text_to_tokens(sample_input_text))
+     tokens_per_doc = sample_tokens / incremental
+ 
+@@ -176,7 +214,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+ 
+     while lower_bound <= upper_bound:
+         mid = (lower_bound + upper_bound) // 2
+-        input_text, answer = generate_input_output(0, mid)
++        input_text, answer, *_ = generate_input_output(0, mid)
+         total_tokens = len(TOKENIZER.text_to_tokens(input_text)) + tokens_to_generate
+ 
+         logger.info(f"Testing haystack size: {mid}, resulting tokens: {total_tokens}/{max_seq_length}")
+@@ -197,7 +235,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+         used_docs = num_docs
+         while(True):
+             try:
+-                input_text, answer = generate_input_output(index + args.pre_samples, used_docs)
++                input_text, answer, haystack, query = generate_input_output(index + args.pre_samples, used_docs)
+                 length = len(TOKENIZER.text_to_tokens(input_text)) + tokens_to_generate
+                 assert length <= max_seq_length, f"{length} exceeds max_seq_length."
+                 break
+@@ -205,8 +243,12 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+                 if used_docs > incremental:
+                     used_docs -= incremental
+ 
++        evidence = QAS[index + args.pre_samples].get('evidence', [])
++
+         if args.remove_newline_tab:
+             input_text = ' '.join(input_text.replace('\n', ' ').replace('\t', ' ').strip().split())
++            haystack = ' '.join(haystack.replace('\n', ' ').replace('\t', ' ').strip().split())
++            evidence = [' '.join(e.replace('\n', ' ').replace('\t', ' ').strip().split()) for e in evidence]
+         answer_prefix_index = input_text.rfind(TASKS['qa']['answer_prefix'][:10]) # use first 10 char of answer prefix to locate it
+         answer_prefix = input_text[answer_prefix_index:]
+         input_text = input_text[:answer_prefix_index]
+@@ -214,6 +256,9 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
+             "index": index,
+             "input": input_text,
+             "outputs": answer,
++            "haystack": haystack,
++            "query": query,
++            "evidence": evidence,
+             "length": length,
+             'length_w_model_temp': length + args.model_template_token,
+             'answer_prefix': answer_prefix,

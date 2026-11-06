@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.idea/
+.ipynb_checkpoints
+
+# data, caches and outputs
+Datasets
+Log_placements
+Score_cache
+Results*/
+signals/
+ruler/RULER/
+logs/

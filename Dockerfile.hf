@@ -1,0 +1,33 @@
+# QGPM evaluation image (NoLiMa and RULER), CUDA 12.8
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+# Hugging Face cache; mount a volume here to keep downloaded models
+ENV HF_HOME=/workspace/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-dev python3-pip \
+        git wget curl ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
+    && python3 -m pip install --upgrade pip setuptools wheel
+
+# PyTorch 2.8 (cu128)
+RUN pip install --no-cache-dir \
+    torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# flash-attn 2.8.3, prebuilt wheel
+RUN pip install --no-cache-dir \
+    https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+
+WORKDIR /workspace/app
+COPY requirements.txt /workspace/app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# The repository, with Datasets/, is mounted at runtime:
+#   docker run --gpus all -it --rm -v "$PWD":/workspace/app qgpm:hf
+CMD ["bash"]
